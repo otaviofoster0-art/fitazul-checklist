@@ -423,6 +423,51 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Login — script separado (não-módulo) para ficar no escopo global -->
+<script>
+(function(){
+  const SENHA = 'fitazul00';
+
+  function mostrarApp(){
+    document.getElementById('login-screen').classList.add('hide');
+    document.getElementById('loading').classList.remove('hide');
+    // Sinaliza ao módulo Firebase que pode iniciar
+    window._appLiberado = true;
+    if(window._iniciarApp) window._iniciarApp();
+  }
+
+  window.fazerLogin = function(){
+    const input = document.getElementById('login-senha');
+    const errEl = document.getElementById('login-err');
+    if(input.value === SENHA){
+      sessionStorage.setItem('fitazul_auth','1');
+      mostrarApp();
+    } else {
+      errEl.textContent = 'Senha incorreta. Tente novamente.';
+      input.value = '';
+      input.classList.remove('shake');
+      void input.offsetWidth;
+      input.classList.add('shake');
+      setTimeout(()=>{ errEl.textContent=''; input.classList.remove('shake'); }, 3000);
+    }
+  };
+
+  // Enter no campo de senha
+  document.addEventListener('DOMContentLoaded', function(){
+    const input = document.getElementById('login-senha');
+    if(input){
+      input.addEventListener('keydown', function(e){ if(e.key==='Enter') window.fazerLogin(); });
+      // Se já autenticado nesta sessão, pula o login
+      if(sessionStorage.getItem('fitazul_auth')==='1'){
+        mostrarApp();
+      } else {
+        input.focus();
+      }
+    }
+  });
+})();
+</script>
+
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -897,45 +942,17 @@ document.getElementById('drop-z').addEventListener('drop',e=>{
 document.getElementById('modal-del').addEventListener('click',function(e){if(e.target===this)window.fecharModal();});
 
 // ── LOGIN ──
-const SENHA_CORRETA = 'fitazul00';
-
-window.fazerLogin = function(){
-  const val = document.getElementById('login-senha').value;
-  const errEl = document.getElementById('login-err');
-  const input = document.getElementById('login-senha');
-  if(val === SENHA_CORRETA){
-    sessionStorage.setItem('fitazul_auth','1');
-    document.getElementById('login-screen').classList.add('hide');
-    document.getElementById('loading').classList.remove('hide');
-    iniciarApp();
-  } else {
-    errEl.textContent = 'Senha incorreta. Tente novamente.';
-    input.value='';
-    input.classList.remove('shake');
-    void input.offsetWidth;
-    input.classList.add('shake');
-    setTimeout(()=>errEl.textContent='', 3000);
-  }
-};
+// (a lógica de senha está no script separado acima)
+// O módulo registra a função de init e chama se já liberado
 
 function iniciarApp(){
-
-// 5. Init
-document.getElementById('a-data').value=new Date().toISOString().split('T')[0];
-buildChecks();
-document.getElementById('loading').classList.add('hide');
-
-} // fim iniciarApp
-
-// Verificar se já está autenticado na sessão
-if(sessionStorage.getItem('fitazul_auth')==='1'){
-  document.getElementById('login-screen').classList.add('hide');
-  document.getElementById('loading').classList.remove('hide');
-  iniciarApp();
-} else {
-  // Foca no campo de senha automaticamente
-  setTimeout(()=>document.getElementById('login-senha').focus(), 100);
+  document.getElementById('a-data').value=new Date().toISOString().split('T')[0];
+  buildChecks();
+  document.getElementById('loading').classList.add('hide');
 }
+
+window._iniciarApp = iniciarApp;
+if(window._appLiberado) iniciarApp();
 
 </script>
 </body>
