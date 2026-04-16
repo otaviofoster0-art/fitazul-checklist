@@ -499,23 +499,15 @@ window.loadFuncs = function(){
   const sel=document.getElementById('a-func');
   sel.innerHTML='<option value="">Selecione o frentista...</option>';
   if(!posto) return;
-  const lista=window.DB.funcs.filter(f=>f.posto===posto);
-  if(!lista.length){sel.innerHTML='<option value="">Nenhum frentista neste posto — importe a planilha</option>';return;}
+  // Só mostra ativos (não marcados como inativo) para novos lançamentos
+  const lista=window.DB.funcs.filter(f=>f.posto===posto && !f.inativo);
+  if(!lista.length){sel.innerHTML='<option value="">Nenhum frentista ativo neste posto</option>';return;}
   lista.forEach(f=>{const o=document.createElement('option');o.value=f.nome;o.textContent=f.nome;sel.appendChild(o);});
 };
 
 function norm(s){return s.trim().toLowerCase().replace(/\s+/g,' ');}
 
-window.checkDup = function(){
-  const posto=document.getElementById('a-posto').value;
-  const func=document.getElementById('a-func').value;
-  const data=document.getElementById('a-data').value;
-  hideAl('al-dup');
-  if(!posto||!func||!data) return;
-  const mes=data.substring(0,7);
-  const ja=window.DB.avs.find(a=>a.posto===posto&&norm(a.func)===norm(func)&&a.data.substring(0,7)===mes);
-  if(ja) showAl('al-dup',`⚠️ <strong>${func}</strong> (${posto}) já foi avaliado(a) em <strong>${mes}</strong>. Cada frentista pode ser avaliado apenas uma vez por mês.`);
-};
+window.checkDup = function(){ hideAl('al-dup'); };
 
 window.salvar = async function(){
   const posto=document.getElementById('a-posto').value;
@@ -524,9 +516,6 @@ window.salvar = async function(){
   const aval=document.getElementById('a-aval').value.trim();
   hideAl('al-dup'); hideAl('al-ok');
   if(!posto||!func||!data||!aval){toast('Preencha posto, frentista, data e avaliador.');return;}
-  const mes=data.substring(0,7);
-  const ja=window.DB.avs.find(a=>a.posto===posto&&norm(a.func)===norm(func)&&a.data.substring(0,7)===mes);
-  if(ja){showAl('al-dup',`⚠️ <strong>${func}</strong> (${posto}) já avaliado(a) em <strong>${mes}</strong>. Bloqueado.`);window.scrollTo({top:0,behavior:'smooth'});return;}
 
   let sim=0; const ck={};
   CL.forEach(c=>{ck[c.id]=checks[c.id];if(checks[c.id]==='sim')sim++;});
@@ -554,7 +543,7 @@ window.salvar = async function(){
   btn.disabled=false; btn.textContent='Salvar avaliação';
 };
 
-// ── IMPORTAR EXCEL (salva no Firestore) ──
+// ── IMPORTAR EXCEL — merge inteligente ──
 window.importarXL = function(e){
   const file=e.target.files[0]; if(!file) return;
   hideAl('al-xl'); hideAl('al-xl-ok');
@@ -562,7 +551,8 @@ window.importarXL = function(e){
   reader.onload=async ev=>{
     try{
       const wb=XLSX.read(ev.target.result,{type:'array',cellText:true,raw:false});
-      let todos=[];
+      let novaPlanilha=[];
+
       wb.SheetNames.forEach(sheetName=>{
         const ws=wb.Sheets[sheetName];
         const arr=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',blankrows:false,raw:false});
@@ -582,17 +572,72 @@ window.importarXL = function(e){
           if(!nome||nome.startsWith('=')) continue;
           if(!postoVal||postoVal.startsWith('=')) continue;
           if(!POSTOS.includes(postoVal)) continue;
-          todos.push({nome,posto:postoVal});
+          novaPlanilha.push({nome, posto:postoVal});
         }
       });
-      if(!todos.length){showAl('al-xl',`Nenhum funcionário válido. Postos aceitos: ${POSTOS.join(', ')}`);return;}
-      const seen=new Set();
-      todos=todos.filter(f=>{const k=norm(f.nome)+'|'+f.posto;if(seen.has(k))return false;seen.add(k);return true;});
-      // Salva no Firestore como documento único "lista"
-      await setDoc(doc(db,'funcionarios','lista'),{funcs: todos, atualizadoEm: new Date().toISOString()});
-      const por=POSTOS.map(p=>{const n=todos.filter(f=>f.posto===p).length;return n?`${p}: ${n}`:null;}).filter(Boolean).join(' · ');
-      showAl('al-xl-ok',`✓ <strong>${todos.length} frentista(s)</strong> importado(s) e sincronizados! &nbsp;|&nbsp; ${por}`);
-      setTimeout(()=>hideAl('al-xl-ok'),6000);
+
+      if(!novaPlanilha.length){
+        showAl('al-xl',`Nenhum funcionário válido encontrado. Postos aceitos: ${POSTOS.join(', ')}`);
+        return;
+      }
+
+      // Deduplicar dentro da própria planilha (mesmo nome+posto)
+      const seenNovos=new Set();
+      novaPlanilha=novaPlanilha.filter(f=>{
+        const k=norm(f.nome)+'|'+f.posto;
+        if(seenNovos.has(k)) return false;
+        seenNovos.add(k); return true;
+      });
+
+      // Lista atual no Firestore
+      const listaAtual = window.DB.funcs || [];
+
+      // Chave de identidade: nome normalizado + posto
+      const chaveNova  = f => norm(f.nome)+'|'+f.posto;
+      const chavesNovas = new Set(novaPlanilha.map(chaveNova));
+      const chavesAtuais= new Set(listaAtual.map(chaveNova));
+
+      // Quem tem avaliação no histórico (para nunca remover mesmo que saia da planilha)
+      const nomesComHistorico = new Set(
+        window.DB.avs.map(a => norm(a.func)+'|'+a.posto)
+      );
+
+      // Regras de merge:
+      // MANTÉM: está na nova planilha OU tem histórico de avaliações
+      // REMOVE: não está na nova planilha E não tem histórico
+      // ADICIONA: está na nova planilha e não estava antes
+
+      const mantidos   = listaAtual.filter(f => chavesNovas.has(chaveNova(f)));
+      const comHistorico = listaAtual.filter(f =>
+        !chavesNovas.has(chaveNova(f)) && nomesComHistorico.has(chaveNova(f))
+      );
+      const removidos  = listaAtual.filter(f =>
+        !chavesNovas.has(chaveNova(f)) && !nomesComHistorico.has(chaveNova(f))
+      );
+      const adicionados = novaPlanilha.filter(f => !chavesAtuais.has(chaveNova(f)));
+
+      // Lista final: mantidos + quem tem histórico (marcado como inativo) + novos
+      const comHistoricoMarcados = comHistorico.map(f=>({...f, inativo:true}));
+      const listaFinal = [...mantidos, ...comHistoricoMarcados, ...adicionados];
+
+      await setDoc(doc(db,'funcionarios','lista'),{
+        funcs: listaFinal,
+        atualizadoEm: new Date().toISOString()
+      });
+
+      // Montar mensagem de resumo
+      const partes=[];
+      if(adicionados.length) partes.push(`<strong>${adicionados.length} adicionado(s)</strong>`);
+      if(mantidos.length)    partes.push(`<strong>${mantidos.length} mantido(s)</strong>`);
+      if(comHistorico.length) partes.push(`<strong>${comHistorico.length} preservado(s)</strong> por ter histórico`);
+      if(removidos.length)   partes.push(`<strong>${removidos.length} removido(s)</strong>`);
+      const por=POSTOS.map(p=>{
+        const n=listaFinal.filter(f=>f.posto===p).length;
+        return n?`${p}: ${n}`:null;
+      }).filter(Boolean).join(' · ');
+
+      showAl('al-xl-ok',`✓ Lista atualizada — ${partes.join(' · ')}<br><small style="opacity:.8">${por}</small>`);
+      setTimeout(()=>hideAl('al-xl-ok'),8000);
     } catch(err){
       showAl('al-xl','Erro ao processar o arquivo. ('+err.message+')');
     }
@@ -612,11 +657,17 @@ function renderFuncTable(){
   const lbl=document.getElementById('func-count-lbl');
   if(!funcs.length){wrap.style.display='none';lbl.textContent='Nenhum funcionário cadastrado';return;}
   wrap.style.display='block';
-  lbl.textContent=`${funcs.length} frentista(s) cadastrado(s) — sincronizados em tempo real`;
+  const ativos=funcs.filter(f=>!f.inativo).length;
+  const inativos=funcs.filter(f=>f.inativo).length;
+  lbl.textContent=`${ativos} ativo(s)${inativos?` · ${inativos} preservado(s) por histórico`:''} — sincronizado em tempo real`;
   document.getElementById('posto-chips').innerHTML=
-    POSTOS.map(p=>{const n=funcs.filter(f=>f.posto===p).length;return n?`<span class="chip">${p}: ${n}</span>`:''}).join('');
+    POSTOS.map(p=>{const n=funcs.filter(f=>f.posto===p&&!f.inativo).length;return n?`<span class="chip">${p}: ${n}</span>`:''}).join('');
   document.getElementById('func-tbody').innerHTML=
-    funcs.map((f,i)=>`<tr><td style="color:var(--muted);width:32px">${i+1}</td><td>${f.nome}</td><td><span class="chip" style="font-size:11px">${f.posto}</span></td></tr>`).join('');
+    funcs.map((f,i)=>`<tr style="${f.inativo?'opacity:.5':''}">
+      <td style="color:var(--muted);width:32px">${i+1}</td>
+      <td>${f.nome}${f.inativo?' <span style="font-size:10px;color:#d97706;background:#FEF3C7;padding:1px 6px;border-radius:8px;margin-left:4px">sem contrato</span>':''}</td>
+      <td><span class="chip" style="font-size:11px">${f.posto}</span></td>
+    </tr>`).join('');
 }
 
 // ── DASHBOARD ──
